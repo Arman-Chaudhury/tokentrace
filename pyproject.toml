@@ -1,0 +1,25 @@
+[project]
+name = "tokentrace"
+version = "0.1.0"
+description = "Per-step token and cost attribution for AI agent runs (Claude Code transcripts first)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+# Stdlib only at runtime: sqlite3, argparse, json, html. Keep it that way.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+tokentrace = "tokentrace.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["tokentrace", "tokentrace.adapters"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
