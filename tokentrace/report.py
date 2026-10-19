@@ -192,6 +192,10 @@ def _bar(value: float, maximum: float, label: str) -> str:
     return f'<div class="bar"><i style="width:{w:.1f}%"></i><b>{_esc(label)}</b></div>'
 
 
+def _usd_bar(value: float, maximum: float) -> str:
+    return _bar(value, maximum, f"${value:,.2f}")
+
+
 def _stack(u: dict[str, int]) -> str:
     total = u.get("total") or 1
     parts = [("input_tokens", "--s1"), ("cache_read_tokens", "--s3"), ("cache_write_tokens", "--s4"),
@@ -274,7 +278,7 @@ def render_html(attr: Attribution, findings: list[Finding]) -> str:
     shown_agents = attr.agents[:25]
     agents_rows = "".join(
         f"<tr><td>{_esc(a['label'])}</td><td class='n'>{a['calls']}</td><td class='n'>{a['tool_calls']}</td>"
-        f"<td>{_bar(a['inclusive_cost_usd'], max_agent, f'${a['inclusive_cost_usd']:,.2f}')}</td>"
+        f"<td>{_usd_bar(a['inclusive_cost_usd'], max_agent)}</td>"
         f"<td class='n'>${a['cost_usd']:,.2f}</td><td class='n'>{_fmt_dur(a['duration_s'])}</td></tr>"
         for a in shown_agents
     )
@@ -286,7 +290,7 @@ def render_html(attr: Attribution, findings: list[Finding]) -> str:
     max_turn = max((x["cost_usd"] for x in attr.turns), default=0)
     turns_rows = "".join(
         f"<tr><td>{_esc(x['label'])}</td><td class='n'>{x['calls']}</td><td class='n'>{x['tool_calls']}</td>"
-        f"<td>{_bar(x['cost_usd'], max_turn, f'${x['cost_usd']:,.2f}')}</td><td>{_stack(x['usage'])}</td></tr>"
+        f"<td>{_usd_bar(x['cost_usd'], max_turn)}</td><td>{_stack(x['usage'])}</td></tr>"
         for x in attr.turns
     )
     max_tool = max((x["inclusive_cost_usd"] for x in attr.tools), default=0)
@@ -294,7 +298,7 @@ def render_html(attr: Attribution, findings: list[Finding]) -> str:
         f"<tr><td>{_esc(x['tool'])}</td><td class='n'>{x['calls']}</td><td class='n'>{x['errors']}</td>"
         f"<td class='n'>{x['result_chars']:,}</td><td class='n'>~{x['est_context_tokens']:,}</td>"
         f"<td class='n'>${x['issue_cost_usd']:,.2f}</td>"
-        f"<td>{_bar(x['inclusive_cost_usd'], max_tool, f'${x['inclusive_cost_usd']:,.2f}')}</td></tr>"
+        f"<td>{_usd_bar(x['inclusive_cost_usd'], max_tool)}</td></tr>"
         for x in attr.tools
     )
     models_rows = "".join(
