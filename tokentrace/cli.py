@@ -5,6 +5,7 @@
     tokentrace check <target>                findings only; exit 1 on any error-level finding
     tokentrace ingest <target>... --db FILE  store events in SQLite for later cross-session queries
     tokentrace totals --db FILE              per-day, per-model totals from the database
+    tokentrace watch [<target>]              follow a live session, one line per turn as it runs
 
 <target> is a transcript path, a session directory, a session id prefix, or ``latest``.
 """
@@ -17,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, attribution, checks, report, store
+from . import __version__, attribution, checks, report, store, watch
 from .adapters import claude_code
 
 
@@ -99,6 +100,10 @@ def cmd_totals(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    return watch.watch(args.target, root=args.root, interval=args.interval, once=args.once)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tokentrace", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -135,6 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--db", required=True)
     t.add_argument("--json", action="store_true")
     t.set_defaults(fn=cmd_totals)
+
+    w = sub.add_parser("watch", help="follow a live session and print cost per turn")
+    w.add_argument("target", nargs="?", default="latest")
+    w.add_argument("--interval", type=float, default=2.0, help="seconds between checks for new transcript lines")
+    w.add_argument("--once", action="store_true", help="print the current state and exit")
+    w.set_defaults(fn=cmd_watch)
     return p
 
 

@@ -67,6 +67,7 @@ No runtime dependencies. Python 3.11 or newer.
 | `tokentrace check <target>` | Findings only. Exit code 1 if any finding is error-level, so it can gate a script |
 | `tokentrace ingest <target>... --db usage.db` | Store parsed events in SQLite |
 | `tokentrace totals --db usage.db` | Per-day, per-model tokens and cost from the database |
+| `tokentrace watch [<target>]` | Follow a live session. Prints one line per turn as it runs, with the turn's cost, the current context size and cache hit rate, and the running session total, plus any new waste finding. Defaults to the most recent session |
 
 `<target>` is a transcript path, a session directory, a session id prefix, or `latest`.
 
@@ -88,7 +89,7 @@ No runtime dependencies. Python 3.11 or newer.
 | `compaction` | The context was summarized; pre and post sizes |
 | `tool_use_without_result`, `result_without_tool_use`, `api_call_without_usage`, `unlinked_subagent`, `unknown_model_price` | Parser gaps or data gaps that lower confidence in the numbers |
 | `tree_mismatch`, `child_exceeds_parent` | Internal invariants. These should never fire; if they do, the report is wrong |
-| `unrecorded_source_usage` | Output tokens agree with the source but the source counts more prompt tokens. Claude Code makes calls on the same model that never appear as messages (compaction summaries, away summaries, classifiers). Billed, but not attributable to a step |
+| `unrecorded_source_usage` | The source counts more tokens than the transcript on some field while being at least as large on every field. Claude Code makes calls on the same model that never appear as messages (compaction summaries, away summaries, classifier and advisor calls). Billed, but not attributable to a step. The parser counting more than the source stays a `token_mismatch` error, since that is what a parser bug looks like |
 | `token_mismatch`, `cost_mismatch`, `unattributable_model`, `model_missing_in_source`, `model_attribution_drift`, `reconciliation` | Comparison with Claude Code's own `cost-state` totals. Models that appear only in the source totals (title generation on Haiku, for example) are listed as unattributable rather than treated as errors |
 
 ## Claude Code transcript facts the parser relies on
