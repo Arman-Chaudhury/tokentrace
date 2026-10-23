@@ -326,22 +326,26 @@ def reconcile(events: list[Event], attr: Attribution, th: Thresholds) -> list[Fi
         diff = abs(a - b) / max(b, 1) if (a or b) else 0.0
         field_status[fld] = {"parsed": a, "source": b, "ratio": round(diff, 4),
                              "ok": diff <= th.reconcile_token_tolerance}
-    output_ok = field_status["output_tokens"]["ok"]
+    # If the source is a superset of the transcript on every field, the gap is
+    # calls Claude Code made on the same model without writing an assistant
+    # message: compaction summaries (which re-read the whole context), away
+    # summaries, classifier and advisor calls.  Real, billed, not attributable
+    # to a step.  Counting MORE than the source is the parser-bug direction and
+    # stays an error.
+    source_superset = all(
+        field_status[f]["source"] >= field_status[f]["parsed"] * (1 - th.reconcile_token_tolerance)
+        for f in _FIELDS
+    )
     for fld in _FIELDS:
         st = field_status[fld]
         if st["ok"]:
             continue
         a, b, diff = st["parsed"], st["source"], st["ratio"]
-        if output_ok and fld in ("input_tokens", "cache_read_tokens") and b > a:
-            # Output agrees, so every recorded response is accounted for.  Extra
-            # prompt tokens on the source side come from calls Claude Code makes
-            # on the same model without writing an assistant message: compaction
-            # summaries (which re-read the whole context), away summaries, and
-            # classifier calls.  Real, billed, but not attributable to a step.
+        if source_superset and b > a:
             out.append(Finding(
                 "warn", "unrecorded_source_usage",
                 f"source counts {b - a:,} more {fld.replace('_tokens', '')} tokens than the transcript records "
-                "(compaction summaries, away summaries, classifier calls on the same model); "
+                "(compaction summaries, away summaries, classifier or advisor calls on the same model); "
                 "these are billed but cannot be attributed to a step",
                 {"field": fld, "parsed": a, "source": b, "excess": b - a, "scope": "aggregate"},
             ))
@@ -390,8 +394,8 @@ def reconcile(events: list[Event], attr: Attribution, th: Thresholds) -> list[Fi
                 "warn", "cost_mismatch",
                 f"inside the snapshot window our price table gives ${ours_cost:.2f}, source says ${theirs_cost:.2f} "
                 f"({diff:.0%} apart; "
-                + ("recorded token counts agree, so the gap is unrecorded background calls or pricing.py"
-                   if aggregate_ok else "token counts also disagree")
+                + ("recorded token counts agree or the source is a superset, so the gap is unrecorded "
+                   "background calls or pricing.py" if aggregate_ok else "token counts also disagree")
                 + f", version {pricing.PRICING_VERSION})",
                 {"parsed_cost": ours_cost, "source_cost": theirs_cost, "ratio": diff, "tokens_agree": aggregate_ok},
             ))
