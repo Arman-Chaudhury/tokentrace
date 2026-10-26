@@ -126,6 +126,7 @@ _CSS = """
   --surface: #fcfcfb; --surface-2: #f1f0ec; --line: #dedcd5;
   --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8883;
   --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
   --warn: #c98500; --err: #e34948; --info: #52514e;
 }
 @media (prefers-color-scheme: dark) {
@@ -134,6 +135,7 @@ _CSS = """
     --surface: #1a1a19; --surface-2: #242423; --line: #3a3936;
     --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8f8e86;
     --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
     --warn: #c98500; --err: #e66767; --info: #c3c2b7;
   }
 }
@@ -142,8 +144,21 @@ _CSS = """
   --surface: #1a1a19; --surface-2: #242423; --line: #3a3936;
   --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8f8e86;
   --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
   --warn: #c98500; --err: #e66767; --info: #c3c2b7;
 }
+.sankey .ribbon { fill: none; opacity: .55; } .sankey .ribbon:hover { opacity: .9; }
+.sankey text { font-size: 12px; fill: var(--ink); } .sankey .muted { fill: var(--ink-3); }
+.flow .arrow { fill: none; opacity: .75; stroke-linecap: round; } .flow .arrow:hover { opacity: 1; }
+.flow .box > rect:first-child { fill: var(--surface-2); stroke: var(--line); }
+.flow .lbl { font-size: 13px; fill: var(--ink); font-weight: 500; } .flow .val { font-size: 12px; fill: var(--ink-2); }
+.flow .colhead { font-size: 11px; fill: var(--ink-3); text-transform: uppercase; letter-spacing: .08em; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 20px 0 8px; }
+.tabs a { padding: 8px 14px; color: var(--ink-2); border-radius: 6px 6px 0 0; }
+.tabs a.on { color: var(--ink); background: var(--surface-2); } .tabs a:hover { text-decoration: none; color: var(--ink); }
+.panel { display: none; } .panel.on { display: block; }
+.stack.tall { height: 22px; } a { color: var(--s1); text-decoration: none; } a:hover { text-decoration: underline; }
+td .d { color: var(--ink-3); font-size: 11px; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--surface); color: var(--ink);
   font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -316,6 +331,8 @@ def render_html(attr: Attribution, findings: list[Finding]) -> str:
         f'<div class="f {f.severity}"><code>{_esc(f.severity)} · {_esc(f.code)}</code>{_esc(f.message)}</div>'
         for f in findings
     ) or '<p class="sub">No findings.</p>'
+    from . import viz  # local import: viz depends on attribution only, report stays light
+    flow_svg = viz.session_sankey(attr)
     legend = ('<div class="legend"><span><i style="background:var(--s1)"></i>fresh input</span>'
               '<span><i style="background:var(--s3)"></i>cache read</span>'
               '<span><i style="background:var(--s4)"></i>cache write</span>'
@@ -328,6 +345,11 @@ def render_html(attr: Attribution, findings: list[Finding]) -> str:
 <h1>{_esc(attr.title or 'Session ' + attr.session_id)}</h1>
 <div class="sub">session {_esc(attr.session_id)} · {_esc(attr.start_ts or '?')} to {_esc(attr.end_ts or '?')}</div>
 <div class="tiles">{tiles_html}</div>
+
+<h2>Where the cost went</h2>
+<p class="sub">Arrow width follows estimated cost: turns on the left, the tools they called in the middle,
+subagents those tools spawned on the right. Hover an arrow or a box for the number.</p>
+{flow_svg}
 
 <h2>Context size per API call (main thread)</h2>
 {_context_svg(attr.context_series, attr.compactions)}
