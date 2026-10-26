@@ -6,6 +6,7 @@
     tokentrace ingest <target>... --db FILE  store events in SQLite for later cross-session queries
     tokentrace totals --db FILE              per-day, per-model totals from the database
     tokentrace watch [<target>]              follow a live session, one line per turn as it runs
+    tokentrace dashboard [--open]            sync all sessions into SQLite and build the HTML dashboard
 
 <target> is a transcript path, a session directory, a session id prefix, or ``latest``.
 """
@@ -18,7 +19,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, attribution, checks, report, store, watch
+from . import __version__, attribution, checks, dashboard, report, store, watch
 from .adapters import claude_code
 
 
@@ -104,6 +105,20 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return watch.watch(args.target, root=args.root, interval=args.interval, once=args.once)
 
 
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    conn = store.open_db(args.db)
+    if args.sync:
+        done, skipped = dashboard.sync(conn, args.root)
+        print(f"synced {done} new or changed sessions ({skipped} unchanged)", file=sys.stderr)
+    index = dashboard.build(conn, args.out, session_limit=args.sessions, days=args.days,
+                            per_session=not args.no_session_pages)
+    print(f"wrote {index}", file=sys.stderr)
+    if args.open:
+        import webbrowser
+        webbrowser.open(index.resolve().as_uri())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tokentrace", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -146,6 +161,17 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--interval", type=float, default=2.0, help="seconds between checks for new transcript lines")
     w.add_argument("--once", action="store_true", help="print the current state and exit")
     w.set_defaults(fn=cmd_watch)
+
+    d = sub.add_parser("dashboard", help="build a static HTML dashboard over the SQLite store")
+    d.add_argument("--db", default="reports/usage.db", help="SQLite store (default reports/usage.db)")
+    d.add_argument("--out", default="reports/dashboard", help="output directory (default reports/dashboard)")
+    d.add_argument("--sessions", type=int, default=60, help="most recent sessions to include")
+    d.add_argument("--days", type=int, default=45, help="days shown in the spend chart")
+    d.add_argument("--no-sync", dest="sync", action="store_false",
+                   help="do not scan ~/.claude/projects for new or changed sessions first")
+    d.add_argument("--no-session-pages", action="store_true", help="skip the per-session report pages")
+    d.add_argument("--open", action="store_true", help="open the dashboard in a browser when done")
+    d.set_defaults(fn=cmd_dashboard)
     return p
 
 
