@@ -67,6 +67,7 @@ No runtime dependencies. Python 3.11 or newer.
 | `tokentrace check <target>` | Findings only. Exit code 1 if any finding is error-level, so it can gate a script |
 | `tokentrace ingest <target>... --db usage.db` | Store parsed events in SQLite |
 | `tokentrace totals --db usage.db` | Per-day, per-model tokens and cost from the database |
+| `tokentrace dashboard [--open]` | Sync every session on the machine into the SQLite store, then write a static dashboard to `reports/dashboard/`: spend per day by model, a flow diagram of cost from models through activities to tools, token mix, a sessions table linking to a full report page per session, tools and recurring findings across sessions. No server, no JavaScript dependencies |
 | `tokentrace watch [<target>]` | Follow a live session. Prints one line per turn as it runs, with the turn's cost, the current context size and cache hit rate, and the running session total, plus any new waste finding. Defaults to the most recent session |
 
 `<target>` is a transcript path, a session directory, a session id prefix, or `latest`.
