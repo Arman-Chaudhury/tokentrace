@@ -32,7 +32,7 @@ def _fmt_dur(s: float | None) -> str:
     return f"{s / 3600:.1f}h"
 
 
-def render_text(attr: Attribution, findings: list[Finding], max_rows: int = 12) -> str:
+def render_text(attr: Attribution, findings: list[Finding], max_rows: int = 12, tips=None) -> str:
     L: list[str] = []
     t = attr.totals
     L.append(f"tokentrace report  session {attr.session_id}")
@@ -101,6 +101,8 @@ def render_text(attr: Attribution, findings: list[Finding], max_rows: int = 12) 
                      f"tokens ({c.get('trigger') or '?'})")
         L.append("")
 
+    if tips:
+        L.append(tips_text(tips))
     L.append(f"FINDINGS ({len(findings)})")
     for f in findings:
         L.append(f"  [{f.severity:<5}] {f.code:<24} {f.message}")
@@ -111,9 +113,40 @@ def render_text(attr: Attribution, findings: list[Finding], max_rows: int = 12) 
 # JSON
 # --------------------------------------------------------------------------- #
 
-def render_json(attr: Attribution, findings: list[Finding]) -> str:
-    return json.dumps({"attribution": attr.to_dict(), "findings": [f.to_dict() for f in findings]},
+def render_json(attr: Attribution, findings: list[Finding], tips=None) -> str:
+    return json.dumps({"attribution": attr.to_dict(), "findings": [f.to_dict() for f in findings],
+                       "tips": [t.to_dict() for t in tips or []]},
                       indent=2, ensure_ascii=False)
+
+
+# --------------------------------------------------------------------------- #
+# Savings tips (shared by the text report, the HTML report, and the CLI)
+# --------------------------------------------------------------------------- #
+
+def tips_text(tips) -> str:
+    free = sum(t.saved_usd for t in tips if t.kind == "free")
+    L = [f"HOW TO SPEND LESS  (estimates; free wins ~{_fmt_usd(free)})"]
+    for t in tips:
+        tag = "free" if t.kind == "free" else "tradeoff"
+        L.append(f"  {_fmt_usd(t.saved_usd):>10}  [{tag}] {t.title}")
+        L.append(f"              fix: {t.fix}")
+        L.append(f"              why: {t.evidence}")
+    L.append("")
+    return "\n".join(L)
+
+
+def tips_html(tips) -> str:
+    if not tips:
+        return '<p class="sub">Nothing worth changing: no expired-cache resumes, cache breaks, or oversized results.</p>'
+    free = sum(t.saved_usd for t in tips if t.kind == "free")
+    head = (f'<p class="sub">Each estimate replays the recorded calls with one change and re-prices them, so it is '
+            f'an upper bound. Free wins add up to about ${free:,.2f}; tradeoffs give something up.</p>')
+    return head + "".join(
+        f'<div class="tip {t.kind}"><div class="th"><b>${t.saved_usd:,.2f}</b> <span>{_esc(t.title)}</span>'
+        f'<code>{"free" if t.kind == "free" else "tradeoff"}</code></div>'
+        f'<p>{_esc(t.fix)}</p><p class="sub">{_esc(t.evidence)}</p></div>'
+        for t in tips
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -188,6 +221,11 @@ details[open] > summary::before { content: "\\25BE"; }
 .node-cost { color: var(--ink-3); font-size: 12px; margin-left: 6px; }
 .node-cost .w { display: inline-block; height: 8px; background: var(--s1); border-radius: 2px; vertical-align: middle; margin-right: 6px; }
 .err-tag { color: var(--err); } .tree { font-size: 13px; }
+.tip { padding: 8px 10px; border-left: 3px solid var(--s3); margin: 8px 0; background: var(--surface-2); border-radius: 0 6px 6px 0; }
+.tip.tradeoff { border-left-color: var(--s4); }
+.tip .th { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.tip .th code { margin-left: auto; }
+.tip p { margin: 4px 0; }
 .f { padding: 6px 8px; border-left: 3px solid var(--info); margin: 6px 0; background: var(--surface-2); border-radius: 0 6px 6px 0; }
 .f.warn { border-color: var(--warn); } .f.error { border-color: var(--err); }
 .f code { color: var(--ink-3); font-size: 12px; margin-right: 8px; }
@@ -276,7 +314,7 @@ def _context_svg(series: list[dict[str, Any]], compactions: list[dict[str, Any]]
             f'<text x="{W - 8}" y="{H - 6}" text-anchor="end">API call {n}</text></svg></div>')
 
 
-def render_html(attr: Attribution, findings: list[Finding]) -> str:
+def render_html(attr: Attribution, findings: list[Finding], tips=None) -> str:
     t = attr.totals
     tiles = [
         ("Estimated cost", f"${attr.total_cost_usd:,.2f}", f"price table {attr.pricing_version}"),
@@ -350,6 +388,9 @@ def render_html(attr: Attribution, findings: list[Finding]) -> str:
 <p class="sub">Arrow width follows estimated cost: turns on the left, the tools they called in the middle,
 subagents those tools spawned on the right. Hover an arrow or a box for the number.</p>
 {flow_svg}
+
+<h2>How to spend less</h2>
+{tips_html(tips or [])}
 
 <h2>Context size per API call (main thread)</h2>
 {_context_svg(attr.context_series, attr.compactions)}

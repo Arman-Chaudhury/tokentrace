@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from . import attribution, checks, pricing, report, store, viz
+from . import attribution, checks, pricing, report, savings, store, viz
 from .adapters import claude_code
 from .schema import Usage
 
@@ -25,12 +25,15 @@ def _esc(s: Any) -> str:
 
 def sync(conn: sqlite3.Connection, root: Path | str | None = None) -> tuple[int, int]:
     """Ingest new or changed Claude Code sessions.  Returns (ingested, skipped)."""
-    known = {s["session_id"]: s["ingested_at"] for s in store.sessions(conn)}
+    known = {s["session_id"]: s for s in store.sessions(conn)}
     done = skipped = 0
     for r in claude_code.list_sessions(root or claude_code.DEFAULT_ROOT):
         if r["bytes"] == 0:
             continue
-        if r["session_id"] in known and known[r["session_id"]] >= r["modified"]:
+        k = known.get(r["session_id"])
+        # Re-ingest when the file changed or when it was stored under an older
+        # price table (older rows may lack fields the current pricing reads).
+        if k and k["ingested_at"] >= r["modified"] and k["pricing_version"] == pricing.PRICING_VERSION:
             skipped += 1
             continue
         events = claude_code.parse_session(r["path"])
@@ -52,8 +55,8 @@ def build(conn: sqlite3.Connection, out_dir: Path | str, session_limit: int = 60
     by_model_tool: dict[tuple[str, str | None], float] = defaultdict(float)
     tool_rows: dict[str, dict[str, Any]] = {}
     finding_counts: Counter[str] = Counter()
-    rewarm_cost = 0.0
     oversized_tokens = 0
+    per_session_tips: list[tuple[str, list[savings.Tip]]] = []
     grand = Usage()
     grand_cost = 0.0
     calls = 0
@@ -65,10 +68,10 @@ def build(conn: sqlite3.Connection, out_dir: Path | str, session_limit: int = 60
         attr = attribution.build(events)
         findings = checks.run_all(events, attr)
         warn = sum(1 for f in findings if f.severity in ("warn", "error"))
+        tips = savings.advise(events, attr, findings)
+        per_session_tips.append((s["session_id"], tips))
         for f in findings:
             finding_counts[f.code] += 1
-            if f.code == "cache_rewarm":
-                rewarm_cost += f.data.get("extra_cost_usd") or 0.0
             if f.code == "oversized_result":
                 oversized_tokens += f.data.get("est_tokens") or 0
         grand.merge(attr.totals)
@@ -95,7 +98,7 @@ def build(conn: sqlite3.Connection, out_dir: Path | str, session_limit: int = 60
 
         page = f"sessions/{s['session_id']}.html"
         if per_session:
-            (out / page).write_text(report.render_html(attr, findings), encoding="utf-8")
+            (out / page).write_text(report.render_html(attr, findings, tips), encoding="utf-8")
         sessions.append({
             "session_id": s["session_id"], "title": attr.title or s["title"] or s["session_id"][:8],
             "start": (attr.start_ts or "")[:10], "active_s": attr.active_s, "calls": sum(m["calls"] for m in attr.models.values()),
@@ -118,7 +121,7 @@ def build(conn: sqlite3.Connection, out_dir: Path | str, session_limit: int = 60
     series = {m: [cost_by_day_model.get((day, m), 0.0) for day in day_list] for m in models}
 
     index = _render_index(sessions, grand, grand_cost, calls, day_list, series, by_model_tool, tool_rows,
-                          finding_counts, rewarm_cost, oversized_tokens)
+                          finding_counts, savings.summarize(per_session_tips), oversized_tokens)
     (out / "index.html").write_text(index, encoding="utf-8")
     return out / "index.html"
 
@@ -135,14 +138,15 @@ def _fmt_dur(s: float | None) -> str:
 
 
 def _render_index(sessions, grand: Usage, grand_cost: float, calls: int, day_list, series, by_model_tool,
-                  tool_rows, finding_counts, rewarm_cost, oversized_tokens) -> str:
+                  tool_rows, finding_counts, tip_rows, oversized_tokens) -> str:
     active_days = len([d for d in day_list if any(series[m][i] for m in series for i in [day_list.index(d)])])
     tiles = [
         ("Estimated spend", f"${grand_cost:,.2f}", f"{len(sessions)} sessions, price table {pricing.PRICING_VERSION}"),
         ("API calls", f"{calls:,}", f"{grand.total:,} tokens"),
         ("Cache hit rate", f"{(grand.cache_read_tokens / grand.context * 100 if grand.context else 0):.0f}%",
          f"{grand.cache_write_tokens:,} tokens written"),
-        ("Idle-gap cache rewrites", f"${rewarm_cost:,.2f}", "extra vs. a cache hit, across sessions"),
+        ("Free savings found", f"${sum(r['saved_usd'] for r in tip_rows if r['kind'] == 'free'):,.2f}",
+         "estimated, see the Savings tab"),
         ("Oversized results", f"~{oversized_tokens:,}", "tokens pushed into context in one go"),
     ]
     tiles_html = "".join(f'<div class="tile"><div class="k">{_esc(k)}</div><div class="v">{_esc(v)}</div>'
@@ -177,6 +181,14 @@ def _render_index(sessions, grand: Usage, grand_cost: float, calls: int, day_lis
     )
     find_html = "".join(f"<tr><td>{_esc(code)}</td><td class='n'>{n}</td></tr>"
                         for code, n in finding_counts.most_common(12))
+    free_total = sum(r["saved_usd"] for r in tip_rows if r["kind"] == "free")
+    tip_html = "".join(
+        f'<div class="tip {r["kind"]}"><div class="th"><b>${r["saved_usd"]:,.2f}</b> <span>{_esc(r["title"])}</span>'
+        f'<code>{"free" if r["kind"] == "free" else "tradeoff"} · {r["sessions"]} sessions</code></div>'
+        f'<p>{_esc(r["fix"])}</p><p class="sub">Largest in one session: ${r["top_usd"]:,.2f} '
+        f'(<a href="sessions/{_esc(r["top_session"])}.html">{_esc(r["top_session"][:8])}</a>).</p></div>'
+        for r in tip_rows
+    ) or '<p class="sub">No savings found.</p>'
 
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -188,6 +200,7 @@ def _render_index(sessions, grand: Usage, grand_cost: float, calls: int, day_lis
 
 <nav class="tabs">
 <a href="#overview" data-tab="overview" class="on">Overview</a>
+<a href="#savings" data-tab="savings">Savings</a>
 <a href="#flow" data-tab="flow">Flow</a>
 <a href="#sessions" data-tab="sessions">Sessions</a>
 <a href="#tools" data-tab="tools">Tools and findings</a>
@@ -198,6 +211,14 @@ def _render_index(sessions, grand: Usage, grand_cost: float, calls: int, day_lis
 {spend_svg}
 <h2>Token mix</h2>
 {mix}
+</section>
+
+<section class="panel" id="savings">
+<h2>How to spend less</h2>
+<p class="sub">Each tip replays the recorded calls with one change and re-prices them, so every number is an upper
+bound. Free wins (about ${free_total:,.2f} here) do the same work for less; tradeoffs give something up, and the tip
+says what. Per-session evidence is on each session page.</p>
+{tip_html}
 </section>
 
 <section class="panel" id="flow">

@@ -7,6 +7,7 @@
     tokentrace totals --db FILE              per-day, per-model totals from the database
     tokentrace watch [<target>]              follow a live session, one line per turn as it runs
     tokentrace dashboard [--open]            sync all sessions into SQLite and build the HTML dashboard
+    tokentrace savings [<target>] [--all]    concrete ways to lower cost, each with an estimated saving
 
 <target> is a transcript path, a session directory, a session id prefix, or ``latest``.
 """
@@ -19,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, attribution, checks, dashboard, report, store, watch
+from . import __version__, attribution, checks, dashboard, report, savings, store, watch
 from .adapters import claude_code
 
 
@@ -47,12 +48,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     attr = attribution.build(events)
     th = checks.Thresholds(oversized_result_chars=args.oversized, cache_rewarm_gap_s=args.cache_gap)
     findings = checks.run_all(events, attr, th)
+    tips = savings.advise(events, attr, findings)
     if args.format == "json":
-        out = report.render_json(attr, findings)
+        out = report.render_json(attr, findings, tips)
     elif args.format == "html":
-        out = report.render_html(attr, findings)
+        out = report.render_html(attr, findings, tips)
     else:
-        out = report.render_text(attr, findings, max_rows=args.rows)
+        out = report.render_text(attr, findings, max_rows=args.rows, tips=tips)
     if args.out:
         Path(args.out).write_text(out, encoding="utf-8")
         print(f"wrote {args.out} ({len(out):,} bytes) for {path}", file=sys.stderr)
@@ -119,6 +121,49 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_savings(args: argparse.Namespace) -> int:
+    if args.all:
+        return _savings_all(args)
+    path, events = _load(args.target, args.root)
+    attr = attribution.build(events)
+    tips = savings.advise(events, attr, checks.run_all(events, attr), context_cap=args.cap)
+    if args.json:
+        print(json.dumps({"session_id": attr.session_id, "total_cost_usd": attr.total_cost_usd,
+                          "tips": [t.to_dict() for t in tips]}, indent=2))
+        return 0
+    print(f"{attr.title or path.stem}: ${attr.total_cost_usd:,.2f} estimated\n")
+    print(report.tips_text(tips) if tips else "No changes worth making in this session.")
+    return 0
+
+
+def _savings_all(args: argparse.Namespace) -> int:
+    conn = store.open_db(args.db)
+    if args.sync:
+        dashboard.sync(conn, args.root)
+    per_session = []
+    total = 0.0
+    for s in store.sessions(conn):
+        events = store.load_events(conn, s["session_id"])
+        if not events:
+            continue
+        attr = attribution.build(events)
+        total += attr.total_cost_usd
+        tips = savings.advise(events, attr, checks.run_all(events, attr), context_cap=args.cap)
+        per_session.append((s["session_id"], tips))
+    rows = savings.summarize(per_session)
+    if args.json:
+        print(json.dumps({"sessions": len(per_session), "total_cost_usd": total, "tips": rows}, indent=2))
+        return 0
+    free = sum(r["saved_usd"] for r in rows if r["kind"] == "free")
+    print(f"{len(per_session)} sessions, ${total:,.2f} estimated. Free wins found: ~${free:,.2f}.\n")
+    for r in rows:
+        print(f"  ${r['saved_usd']:>9,.2f}  [{r['kind']}] {r['title']}  ({r['sessions']} sessions; "
+              f"largest ${r['top_usd']:,.2f} in {r['top_session'][:8]})")
+        print(f"              {r['fix']}\n")
+    print("Run 'tokentrace savings <session>' for the evidence behind one session's numbers.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tokentrace", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -161,6 +206,16 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("--interval", type=float, default=2.0, help="seconds between checks for new transcript lines")
     w.add_argument("--once", action="store_true", help="print the current state and exit")
     w.set_defaults(fn=cmd_watch)
+
+    v = sub.add_parser("savings", help="ways to lower cost, with estimated savings")
+    v.add_argument("target", nargs="?", default="latest")
+    v.add_argument("--all", action="store_true", help="add up tips across every session in the database")
+    v.add_argument("--db", default="reports/usage.db", help="SQLite store for --all (default reports/usage.db)")
+    v.add_argument("--no-sync", dest="sync", action="store_false", help="with --all, skip scanning for new sessions")
+    v.add_argument("--cap", type=int, default=200_000,
+                   help="context size at which the long-context tip simulates a /compact (default 200000)")
+    v.add_argument("--json", action="store_true")
+    v.set_defaults(fn=cmd_savings)
 
     d = sub.add_parser("dashboard", help="build a static HTML dashboard over the SQLite store")
     d.add_argument("--db", default="reports/usage.db", help="SQLite store (default reports/usage.db)")
