@@ -73,7 +73,7 @@ def build_session(root: Path) -> Path:
         _tool_result(T(2), "tu_read2", "x" * 2000, "u3", tur={"type": "text", "file": {"filePath": "/p/a.py"}}),
         _tool_result(T(5), "tu_agent", "found it", "u4", tur={"status": "completed"}),
         # call 3: text only (reasoning leaf) with a big oversized bash result afterwards? no: text only
-        _assistant(T(6), "msg_3", [{"type": "text", "text": "done"}], _usage(5, 1600, 0, 30), "a5"),
+        _assistant(T(6), "msg_3", [{"type": "text", "text": "done"}], _usage(5, 24000, 0, 30), "a5"),
         # turn 2 after a long idle gap: cache re-warm
         _user_text(T(30), "now add a feature", "u5"),
         _assistant(T(31), "msg_4", [{"type": "tool_use", "id": "tu_bash", "name": "Bash",
