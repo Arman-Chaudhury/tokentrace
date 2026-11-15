@@ -262,6 +262,8 @@ def _parse_file(path: Path, session_id: str, agent_id: str | None, parent_tool_u
                         "synthetic": model == "<synthetic>",
                         "api_error": bool(d.get("isApiErrorMessage")),
                         "has_usage": bool(u),
+                        "cache_write_1h_tokens": int(
+                            (u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens") or 0),
                     },
                 ))
             if isinstance(content, list):

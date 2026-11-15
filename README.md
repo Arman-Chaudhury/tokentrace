@@ -68,6 +68,7 @@ No runtime dependencies. Python 3.11 or newer.
 | `tokentrace ingest <target>... --db usage.db` | Store parsed events in SQLite |
 | `tokentrace totals --db usage.db` | Per-day, per-model tokens and cost from the database |
 | `tokentrace dashboard [--open]` | Sync every session on the machine into the SQLite store, then write a static dashboard to `reports/dashboard/`: spend per day by model, a flow diagram of cost from models through activities to tools, token mix, a sessions table linking to a full report page per session, tools and recurring findings across sessions. No server, no JavaScript dependencies |
+| `tokentrace savings [<target>]` | Concrete ways to lower the cost of a session, each with the dollars it would have saved and the evidence. `--all` adds them up across every session in the database. Also shown in `report` and on the dashboard's Savings tab |
 | `tokentrace watch [<target>]` | Follow a live session. Prints one line per turn as it runs, with the turn's cost, the current context size and cache hit rate, and the running session total, plus any new waste finding. Defaults to the most recent session |
 
 `<target>` is a transcript path, a session directory, a session id prefix, or `latest`.
@@ -77,7 +78,7 @@ No runtime dependencies. Python 3.11 or newer.
 1. The adapter turns a transcript into flat **events**: `prompt`, `api_call`, `tool_use`, `tool_result`, `compaction`, `cost_snapshot`. Each carries the session, the agent (main thread or subagent id), the turn, a parent link, and the four token counters.
 2. `attribution.build` rebuilds the tree: session, then turns, then the tool calls each turn made, with subagents nested under the `Agent` call that spawned them.
 3. An API call's tokens and cost are split equally among the tool calls it emitted. Calls that emitted no tool land in a `reasoning` leaf for that turn. Everything rolls up, so inclusive numbers at every level sum to the session total. A check enforces this.
-4. Cost uses a **versioned list-price table** (`pricing.py`). The version is stored with every ingest so historic sessions can be recomputed when prices change. Unknown models are counted at $0 and flagged.
+4. Cost uses a **versioned list-price table** (`pricing.py`). The version is stored with every ingest so historic sessions can be recomputed when prices change. Unknown models are counted at $0 and flagged. Cache writes are priced by TTL: 1.25x input for 5-minute writes and 2x input for 1-hour writes. Claude Code writes almost all of its cache with the 1-hour TTL, so pricing every write at the 5-minute rate understates a session by roughly a sixth.
 
 ### Checks
 
@@ -85,13 +86,28 @@ No runtime dependencies. Python 3.11 or newer.
 |---|---|
 | `repeated_call` | Same `Read`, `Grep`, `Glob`, or `Bash` command ran more than once; reports the repeat tokens |
 | `oversized_result` | A tool result above the size threshold (default 15,000 chars) |
-| `cache_rewarm` | A large cache write after an idle gap longer than the 5-minute cache TTL, with the extra cost versus a hit |
+| `cache_rewarm` | The previous context had to be written to the cache again because the idle gap outlived the cache (1 hour for 1-hour writes, 5 minutes otherwise). Reports the extra cost versus a hit |
+| `cache_break` | The same kind of rewrite while the cache was still warm, because the prefix changed: a model switch, a compaction, or an edited system prompt or tool list (the last is inferred) |
 | `context_jump` | Context grew by more than 30k tokens in one step |
 | `compaction` | The context was summarized; pre and post sizes |
 | `tool_use_without_result`, `result_without_tool_use`, `api_call_without_usage`, `unlinked_subagent`, `unknown_model_price` | Parser gaps or data gaps that lower confidence in the numbers |
 | `tree_mismatch`, `child_exceeds_parent` | Internal invariants. These should never fire; if they do, the report is wrong |
 | `unrecorded_source_usage` | The source counts more tokens than the transcript on some field while being at least as large on every field. Claude Code makes calls on the same model that never appear as messages (compaction summaries, away summaries, classifier and advisor calls). Billed, but not attributable to a step. The parser counting more than the source stays a `token_mismatch` error, since that is what a parser bug looks like |
 | `token_mismatch`, `cost_mismatch`, `unattributable_model`, `model_missing_in_source`, `model_attribution_drift`, `reconciliation` | Comparison with Claude Code's own `cost-state` totals. Models that appear only in the source totals (title generation on Haiku, for example) are listed as unattributable rather than treated as errors |
+
+### Savings tips
+
+`tokentrace savings` turns the findings into changes you can make. Each tip replays the recorded calls with one thing changed and prices them again. That assumes the model would have made the same calls otherwise, so read every number as an upper bound. Tips can overlap (compacting earlier also shrinks what an idle resume rewrites), so don't add them all up.
+
+| Tip | Kind | What it estimates |
+|---|---|---|
+| Clear or compact before a long break | free | Each expired-cache resume, as if it had started again from the session's base context |
+| Keep the model and the prompt prefix fixed | free | The rewrites recorded as `cache_break`, apart from compactions |
+| Trim large tool output | free | Each result over 4,000 tokens cut to 1,000. The tokens saved are paid once as a cache write and again as a read on every later call until the context shrinks |
+| Compact when the context passes 200k | tradeoff | The main thread replayed with a /compact each time it crosses `--cap`. The cost of each compaction (one full read, a summary, a fresh write) is subtracted |
+| Use a cheaper model for routine turns | tradeoff | The same calls priced one tier down (Fable to Opus 5.5, Opus to Sonnet 5.5) |
+
+Across 79 of the author's sessions ($1,487), the free wins came to about $574. Almost all of that came from returning to large sessions after more than an hour away.
 
 ## Claude Code transcript facts the parser relies on
 
@@ -102,6 +118,7 @@ Verified against Claude Code 2.1.216 through 2.1.301 on macOS. Pinned in the fix
 - `user` lines whose content is a list of `tool_result` blocks are tool results. `toolUseResult` holds structured data such as `stdout` and `filePath`.
 - `system` lines with `subtype: "compact_boundary"` mark compaction; `compactMetadata` has `preTokens` and `postTokens`. The follow-up `user` line has `isCompactSummary: true` and does not start a new turn.
 - `cost-state` lines are Claude Code's own running totals per model, used for reconciliation. They cover only the current process lifetime (`startTime`) and are written periodically, so parsed events are restricted to that window before comparing. They key usage by the model active at snapshot time, so a session that changed model is compared in aggregate first.
+- `usage.cache_creation` splits each cache write into `ephemeral_1h_input_tokens` and `ephemeral_5m_input_tokens`. Claude Code uses the 1-hour TTL for nearly all writes.
 - `<synthetic>` is the model name for locally generated messages and is priced at zero.
 
 If a Claude Code release changes any of this, the fixture-based tests fail before the report silently goes wrong.
@@ -110,7 +127,7 @@ If a Claude Code release changes any of this, the fixture-based tests fail befor
 
 - More adapters (Cursor, Codex CLI, raw API logs) producing the same events, each declaring its attribution depth: steps, calls, or totals only.
 - Reconciliation against the Anthropic usage API, not only the local `cost-state`.
-- A local dashboard over the SQLite store: per-day spend across tools, model mix, and budget alerts.
+- Budget alerts: warn in `watch` when a session or a day passes a set amount, and when a resume is about to rewrite a large expired cache.
 - Side-by-side comparison of the same task run in two tools.
 
 ## Development

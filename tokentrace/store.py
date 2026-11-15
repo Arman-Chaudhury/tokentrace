@@ -120,7 +120,8 @@ def daily_totals(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                SUM(input_tokens) AS input_tokens,
                SUM(cache_read_tokens) AS cache_read_tokens,
                SUM(cache_write_tokens) AS cache_write_tokens,
-               SUM(output_tokens) AS output_tokens
+               SUM(output_tokens) AS output_tokens,
+               SUM(COALESCE(json_extract(payload, '$.cache_write_1h_tokens'), 0)) AS cache_write_1h_tokens
         FROM events
         WHERE kind = 'api_call' AND ts != ''
         GROUP BY day, source, model
@@ -131,7 +132,8 @@ def daily_totals(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     for r in rows:
         d = dict(r)
         d["cost_usd"] = pricing.cost_usd(
-            d["model"], d["input_tokens"], d["cache_read_tokens"], d["cache_write_tokens"], d["output_tokens"]
+            d["model"], d["input_tokens"], d["cache_read_tokens"], d["cache_write_tokens"], d["output_tokens"],
+            d["cache_write_1h_tokens"] or 0,
         )
         out.append(d)
     return out

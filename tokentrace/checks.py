@@ -101,33 +101,103 @@ def oversized_results(events: list[Event], attr: Attribution, th: Thresholds) ->
     return out
 
 
+def _ttl_s(e: Event, fallback: float) -> float:
+    """Cache lifetime that applied to this call's writes.
+
+    Uses the adapter's 1-hour/5-minute split when present; otherwise the
+    configured fallback (5 minutes by default, the API's default TTL).
+    """
+    w1h = int(e.payload.get("cache_write_1h_tokens") or 0)
+    if e.cache_write_tokens and w1h * 2 >= e.cache_write_tokens:
+        return 3600.0
+    if "cache_write_1h_tokens" in e.payload and e.cache_write_tokens:
+        return 300.0
+    return fallback
+
+
+def _rewrite_cost(e: Event, tokens: int) -> float | None:
+    """Extra USD paid for writing ``tokens`` instead of reading them from cache."""
+    p = pricing.lookup(e.model)
+    if p is None:
+        return None
+    w1h = int(e.payload.get("cache_write_1h_tokens") or 0)
+    share_1h = (w1h / e.cache_write_tokens) if e.cache_write_tokens else 0.0
+    rate = share_1h * p.cache_write_1h + (1 - share_1h) * p.cache_write
+    return tokens * (rate - p.cache_read) / 1e6
+
+
 def cache_rewarms(events: list[Event], th: Thresholds) -> list[Finding]:
-    """Large cache writes after an idle gap: the 5-minute cache expired and was rebuilt."""
+    """Large cache rewrites of a prefix that was already cached.
+
+    For each call, the tokens of the previous call's context that were not read
+    back from cache had to be written again.  When that is large:
+
+    * ``cache_rewarm``: the idle gap exceeded the cache TTL, so the entry expired
+      (1 hour for Claude Code's 1-hour writes, 5 minutes otherwise).
+    * ``cache_break``: the cache was still warm but the prefix changed, e.g. a
+      model switch, a compaction, or an edited system prompt / tool list.
+    """
     out = []
     last_by_agent: dict[str | None, Event] = {}
+    compacted: set[str | None] = set()
     for e in events:
+        if e.kind == "compaction":
+            compacted.add(e.agent_id)
+            continue
         if e.kind != "api_call" or e.payload.get("synthetic"):
             continue
         prev = last_by_agent.get(e.agent_id)
         last_by_agent[e.agent_id] = e
+        was_compacted = e.agent_id in compacted
+        compacted.discard(e.agent_id)
         if prev is None:
+            continue
+        rewritten = min(e.cache_write_tokens, max(prev.context_tokens - e.cache_read_tokens, 0))
+        if rewritten < th.cache_rewarm_min_tokens:
             continue
         a, b = parse_ts(prev.ts), parse_ts(e.ts)
         if a is None or b is None:
             continue
         gap = (b - a).total_seconds()
-        if gap >= th.cache_rewarm_gap_s and e.cache_write_tokens >= th.cache_rewarm_min_tokens:
-            p = pricing.lookup(e.model)
-            cost = (e.cache_write_tokens * (p.cache_write - p.cache_read) / 1e6) if p else None
+        ttl = _ttl_s(e, th.cache_rewarm_gap_s)
+        cost = _rewrite_cost(e, rewritten)
+        where = f"turn {e.turn}" + (f", agent {e.agent_id}" if e.agent_id else "")
+        money = f", ~${cost:.2f} more than a cache hit" if cost is not None else ""
+        data = {"ts": e.ts, "gap_s": round(gap), "ttl_s": round(ttl), "cache_write_tokens": e.cache_write_tokens,
+                "rewritten_tokens": rewritten, "agent_id": e.agent_id or "main", "turn": e.turn,
+                "model": e.model, "extra_cost_usd": cost}
+        if gap >= ttl:
             out.append(Finding(
                 "info", "cache_rewarm",
-                f"{e.cache_write_tokens:,} tokens re-written to cache after a {gap / 60:.0f}-minute gap"
-                f" (turn {e.turn}" + (f", agent {e.agent_id}" if e.agent_id else "") + ")"
-                + (f", ~${cost:.2f} more than a cache hit" if cost is not None else ""),
-                {"ts": e.ts, "gap_s": round(gap), "cache_write_tokens": e.cache_write_tokens,
-                 "agent_id": e.agent_id or "main", "turn": e.turn, "extra_cost_usd": cost},
+                f"{rewritten:,} tokens re-written to cache after a {_fmt_gap(gap)} gap "
+                f"(cache lifetime {_fmt_gap(ttl)}; {where}){money}",
+                data,
             ))
+            continue
+        if was_compacted:
+            cause = "compaction"
+        elif pricing.normalize_model(prev.model) != pricing.normalize_model(e.model):
+            cause = "model_switch"
+        else:
+            cause = "prefix_change"
+        label = {"compaction": "the context was compacted",
+                 "model_switch": f"the model changed ({prev.model} -> {e.model}); caches are per model",
+                 "prefix_change": "the prompt prefix changed while the cache was warm "
+                                  "(system prompt, tool list, or memory/CLAUDE.md edit)"}[cause]
+        out.append(Finding(
+            "info", "cache_break",
+            f"{rewritten:,} tokens re-written {_fmt_gap(gap)} after the previous call because {label} ({where}){money}",
+            data | {"cause": cause},
+        ))
     return out
+
+
+def _fmt_gap(s: float) -> str:
+    if s < 90:
+        return f"{s:.0f}-second"
+    if s < 5400:
+        return f"{s / 60:.0f}-minute"
+    return f"{s / 3600:.1f}-hour"
 
 
 def context_jumps(events: list[Event], th: Thresholds) -> list[Finding]:
@@ -296,7 +366,7 @@ def reconcile(events: list[Event], attr: Attribution, th: Thresholds) -> list[Fi
         key = pricing.normalize_model(e.model)
         ours.setdefault(key, Usage()).add(e)
         ours_total.add(e)
-        c = pricing.cost_usd(e.model, e.input_tokens, e.cache_read_tokens, e.cache_write_tokens, e.output_tokens)
+        c = pricing.event_cost(e)
         ours_cost += c or 0.0
 
     out = []

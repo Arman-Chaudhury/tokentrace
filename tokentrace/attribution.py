@@ -99,7 +99,7 @@ def parse_ts(ts: str | None) -> datetime | None:
 
 
 def _call_cost(e: Event, unknown: set[str]) -> float:
-    c = pricing.cost_usd(e.model, e.input_tokens, e.cache_read_tokens, e.cache_write_tokens, e.output_tokens)
+    c = pricing.event_cost(e)
     if c is None:
         unknown.add(e.model or "?")
         return 0.0
